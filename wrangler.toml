@@ -1,0 +1,12 @@
+name = "neo-admin-bot"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+workers_dev = true
+
+[vars]
+ADMIN_ID = "8874504954"
+
+# Lets the worker re-invoke itself to continue long agent runs in a fresh invocation.
+[[services]]
+binding = "SELF"
+service = "neo-admin-bot"

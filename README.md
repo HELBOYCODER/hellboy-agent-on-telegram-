@@ -313,3 +313,36 @@ Neo-AI-Bot/
 
 </div>
 </div>
+
+</div>
+
+---
+
+<div dir="rtl">
+
+## 🖥 حالت ایجنت (ترمینال، کدنویسی، حافظه بلندمدت)
+
+ربات به‌صورت پیش‌فرض در چت خصوصی در **حالت ایجنت** کار می‌کند (با `/agent` خاموش/روشن می‌شود):
+
+- **ترمینال مجازی** با ورک‌اسپیس ماندگار برای هر کاربر (ذخیره در Redis): `ls cd cat grep sed find mkdir cp mv rm curl`، pipe، `&&`، heredoc و ...
+- **اجرای کد واقعی** (Python, Node, Bash, C/C++, Go, Rust, Ruby, PHP, Lua, Perl, TypeScript) روی سندباکس خارجی [Wandbox](https://wandbox.org) — بدون VPS و Docker.
+- ابزارهای `write_file / read_file / edit_file / send_file / http_request` برای ساخت، ویرایش، تست و ارسال فایل پروژه.
+- **حافظه بلندمدت** (`/memory`) و **جستجو در چت‌های قبلی** برای یادآوری.
+- ادامه‌ی خودکار کارهای طولانی (چند مرحله‌ای) از طریق Service Binding به خود Worker (`SELF`)، چون Workers رایگان ۳۰ ثانیه/۵۰ subrequest در هر اجرا دارد.
+- دستورها: `/sh` `/files` `/get` `/agent` `/memory` `/forget` `/reset_ws` `/help`
+
+> محدودیت‌ها: `pip/npm install` و `git` در ترمینال مجازی وجود ندارد. ترمینال واقعی لینوکس (Cloudflare Containers) نیازمند پلن Paid است.
+
+### دیپلوی
+
+```bash
+npm install
+export CLOUDFLARE_API_TOKEN=...   # توکن API کلودفلر
+export CLOUDFLARE_ACCOUNT_ID=...
+npx wrangler secret put BOT_TOKEN
+npx wrangler secret put UPSTASH_URL      # مثل https://xxx.upstash.io
+npx wrangler secret put UPSTASH_TOKEN
+npm run deploy
+```
+
+</div>

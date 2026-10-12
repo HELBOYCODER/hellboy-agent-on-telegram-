@@ -3,8 +3,31 @@
  * Developer Channel: T.me/Neotenet
  */
 
+import {
+  startAgent, continueAgent, userShell, resetWorkspace, listMemories, clearMemories, saveUpload,
+  setOrigin, agentSignature, AGENT_HELP
+} from "./agent.js";
+
+const TEXT_EXT = /\.(js|mjs|ts|tsx|jsx|py|txt|md|json|html|css|cpp|cc|c|h|hpp|java|go|rs|sh|yaml|yml|toml|ini|csv|xml|sql|php|rb|lua|pl|log|env|cfg)$/i;
+
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    setOrigin(url.origin);
+
+    // internal endpoint: continue a long-running agent job in a fresh invocation
+    if (request.method === "POST" && url.pathname === "/__agent") {
+      if (request.headers.get("x-agent-sig") !== (await agentSignature(env))) return new Response("forbidden", { status: 403 });
+      try {
+        const { runId } = await request.json();
+        ctx.waitUntil(continueAgent(env, String(runId)));
+      } catch (err) {
+        console.error("Agent continue error:", err);
+        return new Response("bad request", { status: 400 });
+      }
+      return new Response("accepted", { status: 202 });
+    }
+
     if (request.method === "POST") {
       try {
         const update = await request.json();
@@ -124,11 +147,13 @@ async function handleUpdate(update, env, ctx) {
 
     ctx.waitUntil(trackUserActivity(env, userId));
 
+    let uploadedDoc = null;
     if (msg.document) {
       const doc = msg.document;
-      if (doc.file_name && (doc.file_name.endsWith('.js') || doc.file_name.endsWith('.py') || doc.file_name.endsWith('.txt') || doc.file_name.endsWith('.json') || doc.file_name.endsWith('.html') || doc.file_name.endsWith('.css') || doc.file_name.endsWith('.cpp') || doc.file_name.endsWith('.java'))) {
+      if (doc.file_name && TEXT_EXT.test(doc.file_name) && (doc.file_size || 0) <= 190 * 1024) {
         const fileContent = await getTelegramFileText(botToken, doc.file_id);
         if (fileContent) {
+          uploadedDoc = { name: doc.file_name, content: fileContent };
           text = `${text}\n\n محتوای فایل ارسال شده (${doc.file_name}):\n\`\`\`\n${fileContent}\n\`\`\``;
         }
       }
@@ -221,6 +246,51 @@ async function handleUpdate(update, env, ctx) {
         return;
       }
       await sendModelSelectionMenu(botToken, env, chatId, isGroup ? `group_${chatId}` : userId);
+      return;
+    }
+
+    // ---------- دستورات ایجنت / ترمینال ----------
+    const cmdName = text.startsWith("/") ? text.split(/[\s@]/)[0].toLowerCase() : "";
+    const cmdArg = text.replace(/^\/\S+\s*/, "").trim();
+    const agentKey = `AGENT_MODE_${isGroup ? `group_${chatId}` : userId}`;
+
+    if (cmdName === "/agent") {
+      if (isGroup && !(await isGroupAdmin(botToken, chatId, userId, adminId))) return;
+      const cur = await safeKvGet(env, agentKey);
+      const isOn = cur === null ? !isGroup : cur === "on";
+      await safeKvPut(env, agentKey, isOn ? "off" : "on");
+      await tgRequest(botToken, "sendMessage", {
+        chat_id: chatId,
+        text: isOn ? "💬 حالت ایجنت *خاموش* شد (چت ساده)." : "🖥 حالت ایجنت *روشن* شد: ترمینال، ساخت و اجرای کد، حافظه بلندمدت.",
+        parse_mode: "Markdown"
+      });
+      return;
+    }
+
+    if (!isGroup && ["/sh", "/files", "/get", "/reset_ws", "/memory", "/forget", "/help"].includes(cmdName)) {
+      if (cmdName === "/help") {
+        await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: AGENT_HELP, parse_mode: "Markdown" });
+      } else if (cmdName === "/sh") {
+        if (!cmdArg) await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: "استفاده: `/sh ls -la`  (برای راهنما: `/sh help`)", parse_mode: "Markdown" });
+        else await userShell(env, userId, chatId, msg.message_id, cmdArg);
+      } else if (cmdName === "/files") {
+        await userShell(env, userId, chatId, msg.message_id, "tree /workspace");
+      } else if (cmdName === "/get") {
+        if (!cmdArg) await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: "استفاده: `/get مسیر/فایل.py`", parse_mode: "Markdown" });
+        else await userShell(env, userId, chatId, msg.message_id, `send ${cmdArg}`);
+      } else if (cmdName === "/reset_ws") {
+        await resetWorkspace(env, userId);
+        await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: "🗑 ورک‌اسپیس پاک شد." });
+      } else if (cmdName === "/memory") {
+        const mems = await listMemories(env, userId);
+        await tgRequest(botToken, "sendMessage", {
+          chat_id: chatId,
+          text: mems.length ? "🧠 حافظه بلندمدت:\n" + mems.map(m => `• ${m.text}`).join("\n") : "🧠 هنوز چیزی در حافظه ذخیره نشده. ایجنت خودش موارد مهم را ذخیره می‌کند."
+        });
+      } else if (cmdName === "/forget") {
+        await clearMemories(env, userId);
+        await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: "🧹 حافظه بلندمدت پاک شد." });
+      }
       return;
     }
 
@@ -389,8 +459,23 @@ async function handleUpdate(update, env, ctx) {
     const targetKeyId = isGroup ? `group_${chatId}` : userId;
     const userMode = (await safeKvGet(env, `USER_MODE_${targetKeyId}`)) || "CHAT";
 
+    const agentRaw = await safeKvGet(env, `AGENT_MODE_${targetKeyId}`);
+    const agentOn = agentRaw === null ? !isGroup : agentRaw === "on";
+
     if (userMode === "IMAGE_GEN") {
       await processImageRequest(botToken, env, chatId, userId, text, targetKeyId);
+    } else if (agentOn) {
+      if (uploadedDoc) {
+        const savedPath = await saveUpload(env, userId, uploadedDoc.name, uploadedDoc.content);
+        const caption = text.split("\n\n محتوای فایل ارسال شده")[0].trim();
+        text = `${caption}\n\n[فایل «${uploadedDoc.name}» توسط کاربر ارسال و در ورک‌اسپیس ذخیره شد: ${savedPath || "ذخیره نشد - حجم زیاد"}]`.trim();
+      }
+      await startAgent(env, {
+        botToken, chatId, userId, msg, textPrompt: text, targetKeyId, isGroup,
+        replyTo: isGroup ? targetReplyMsgId : undefined,
+        fromName: msg.from.first_name || msg.from.username || "",
+        mention: msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name || "کاربر")
+      });
     } else {
       await processAIRequest(botToken, env, chatId, userId, msg, text, targetKeyId, isGroup, targetReplyMsgId);
     }
@@ -424,7 +509,7 @@ async function handleUpdate(update, env, ctx) {
     }
 
     if (isGroupQuery) {
-      const settingsButtons = ["mode_chat", "mode_image", "select_model_menu"];
+      const settingsButtons = ["mode_chat", "mode_image", "select_model_menu", "toggle_agent"];
       const isSetModel = data.startsWith("set_model_") || data.startsWith("set_img_model_");
 
       if (settingsButtons.includes(data) || isSetModel) {
@@ -460,6 +545,15 @@ async function handleUpdate(update, env, ctx) {
 
     if (data === "check_sponsor" || data === "main_menu") {
       if (!isGroupQuery) await sendMainMenu(botToken, chatId, userId, adminId);
+    } else if (data === "toggle_agent") {
+      const k = `AGENT_MODE_${targetKeyId}`;
+      const cur = await safeKvGet(env, k);
+      const isOn = cur === null ? !isGroupQuery : cur === "on";
+      await safeKvPut(env, k, isOn ? "off" : "on");
+      await tgRequest(botToken, "sendMessage", {
+        chat_id: chatId,
+        text: isOn ? "💬 حالت ایجنت خاموش شد (چت ساده)." : "🖥 حالت ایجنت روشن شد! هر چیزی بخواهی را بگو؛ ترمینال، کدنویسی، اجرا و حافظه فعال است.\nراهنما: /help"
+      });
     } else if (data === "mode_chat") {
       await safeKvPut(env, `USER_MODE_${targetKeyId}`, "CHAT");
       await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: "💬 حالت گفتگو متنی، تصویری، فایل و ساخت کد فعال شد." });
@@ -578,6 +672,9 @@ async function sendMainMenu(botToken, chatId, userId, adminId) {
     [
       { text: "🤖 انتخاب مدل هوش مصنوعی", callback_data: "select_model_menu" },
       { text: "📜 تاریخچه گفتگوها", callback_data: "history_menu" }
+    ],
+    [
+      { text: "🖥 حالت ایجنت (ترمینال)", callback_data: "toggle_agent" }
     ],
     [
       { text: "➕ شروع گفتگوی جدید", callback_data: "new_chat" }
@@ -950,7 +1047,7 @@ async function processAIRequest(botToken, env, chatId, userId, msg, textPrompt, 
   }
 }
 
-async function sendSafeAIResponse(botToken, chatId, messageId, text, replyToMessageId = null) {
+export async function sendSafeAIResponse(botToken, chatId, messageId, text, replyToMessageId = null) {
   let editPayload = {
     chat_id: chatId,
     message_id: messageId,
@@ -1393,7 +1490,7 @@ async function clearUserState(env, userId) {
   ]);
 }
 
-async function getOrCreateActiveSession(env, userId) {
+export async function getOrCreateActiveSession(env, userId) {
   let activeId = await safeKvGet(env, `ACTIVE_SESSION_${userId}`);
   if (!activeId) {
     activeId = `sess_${Date.now()}`;
@@ -1405,7 +1502,7 @@ async function getOrCreateActiveSession(env, userId) {
   return activeId;
 }
 
-async function updateSessionTitleIfNew(env, userId, sessionId, firstMsg) {
+export async function updateSessionTitleIfNew(env, userId, sessionId, firstMsg) {
   let sessions = JSON.parse((await safeKvGet(env, `SESSIONS_${userId}`)) || "[]");
   const session = sessions.find(s => s.id === sessionId);
   if (session && session.title === "گفتگوی جدید 💬") {
@@ -1414,7 +1511,7 @@ async function updateSessionTitleIfNew(env, userId, sessionId, firstMsg) {
   }
 }
 
-async function tgRequest(token, method, body) {
+export async function tgRequest(token, method, body) {
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: "POST",
@@ -1456,7 +1553,7 @@ async function checkSponsorJoin(botToken, env, userId) {
   return { ok: unjoined.length === 0, unjoined };
 }
 
-async function getTelegramFileBase64(botToken, fileId) {
+export async function getTelegramFileBase64(botToken, fileId) {
   try {
     const fileResJson = await tgRequest(botToken, "getFile", { file_id: fileId });
     if (!fileResJson.ok || !fileResJson.result?.file_path) return null;

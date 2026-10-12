@@ -1,0 +1,24 @@
+{
+  "name": "hellboy-agent-on-telegram-",
+  "version": "1.0.0",
+  "description": "Telegram AI agent bot on Cloudflare Workers + Upstash Redis",
+  "main": "worker.js",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HELBOYCODER/hellboy-agent-on-telegram-.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/HELBOYCODER/hellboy-agent-on-telegram-/issues"
+  },
+  "homepage": "https://github.com/HELBOYCODER/hellboy-agent-on-telegram-#readme",
+  "devDependencies": {
+    "wrangler": "^4.149.0"
+  },
+  "private": true
+}
