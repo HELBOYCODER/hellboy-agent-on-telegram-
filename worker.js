@@ -225,7 +225,7 @@ async function handleUpdate(update, env, ctx) {
         return;
       }
       await clearUserState(env, userId);
-      await sendMainMenu(botToken, chatId, userId, adminId);
+      await sendMainMenu(botToken, chatId, userId, adminId, env);
       return;
     }
 
@@ -275,6 +275,19 @@ async function handleUpdate(update, env, ctx) {
       if (isGroup && !(await isGroupAdmin(botToken, chatId, userId, adminId)) && !cmdArg) return;
       if (cmdArg || msg.photo) await processImage(botToken, env, chatId, userId, msg, cmdArg, tk, isGroup ? msg.message_id : undefined);
       else { await safeKvPut(env, `USER_MODE_${tk}`, "IMAGE_GEN"); await sendImageMenu(botToken, env, chatId, userId, tk, 0, null, isGroup); }
+      return;
+    }
+
+    if (!isGroup && ["/admin", "/panel", "/settings", "/lang", "/language"].includes(cmdName)) {
+      await clearUserState(env, userId);
+      if (cmdName === "/admin" || cmdName === "/panel") {
+        if (userId === adminId) await sendAdminPanel(botToken, chatId);
+        else await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: UI[await getLang(env, userId)].adminOnly });
+      } else if (cmdName === "/settings") {
+        await sendSettingsMenu(botToken, env, chatId, userId, adminId);
+      } else {
+        await sendLangMenu(botToken, env, chatId, userId);
+      }
       return;
     }
 
@@ -485,6 +498,7 @@ async function handleUpdate(update, env, ctx) {
         botToken, chatId, userId, msg, textPrompt: text, targetKeyId, isGroup,
         replyTo: isGroup ? targetReplyMsgId : undefined,
         fromName: msg.from.first_name || msg.from.username || "",
+        lang: await getLang(env, userId),
         mention: msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name || "کاربر")
       });
     } else {
@@ -551,6 +565,32 @@ async function handleUpdate(update, env, ctx) {
     await tgRequest(botToken, "answerCallbackQuery", { callback_query_id: query.id });
 
     if (data === "noop") return;
+
+    if (!isGroupQuery && (data === "settings_menu" || data === "lang_menu" || data.startsWith("set_lang_") || data.startsWith("settings_") || data === "memory_view" || data === "help_view")) {
+      const mid = query.message.message_id;
+      if (data === "settings_menu") await sendSettingsMenu(botToken, env, chatId, userId, adminId, mid);
+      else if (data === "lang_menu") await sendLangMenu(botToken, env, chatId, userId, mid);
+      else if (data.startsWith("set_lang_")) {
+        const lang = data === "set_lang_en" ? "en" : "fa";
+        await safeKvPut(env, `LANG_${userId}`, lang);
+        await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: UI[lang].langSet });
+        await sendSettingsMenu(botToken, env, chatId, userId, adminId, mid);
+      } else if (data === "settings_toggle_agent") {
+        const cur = await safeKvGet(env, `AGENT_MODE_${userId}`);
+        await safeKvPut(env, `AGENT_MODE_${userId}`, (cur === null || cur === "on") ? "off" : "on");
+        await sendSettingsMenu(botToken, env, chatId, userId, adminId, mid);
+      } else if (data === "settings_reset_ws") {
+        await resetWorkspace(env, userId);
+        await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: UI[await getLang(env, userId)].wsCleared });
+      } else if (data === "memory_view") {
+        const t = UI[await getLang(env, userId)];
+        const mems = await listMemories(env, userId);
+        await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: mems.length ? `${t.memTitle}\n` + mems.map(m => `• ${m.text}`).join("\n") : t.noMem });
+      } else if (data === "help_view") {
+        await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: AGENT_HELP, parse_mode: "Markdown" });
+      }
+      return;
+    }
     if (data === "admin_scan" || data.startsWith("scan_")) {
       if (userId === adminId) await handleScanCallback(botToken, env, query, adminId);
       return;
@@ -561,7 +601,7 @@ async function handleUpdate(update, env, ctx) {
     }
 
     if (data === "check_sponsor" || data === "main_menu") {
-      if (!isGroupQuery) await sendMainMenu(botToken, chatId, userId, adminId);
+      if (!isGroupQuery) await sendMainMenu(botToken, chatId, userId, adminId, env, data === "main_menu" ? query.message.message_id : null);
     } else if (data === "toggle_agent") {
       const k = `AGENT_MODE_${targetKeyId}`;
       const cur = await safeKvGet(env, k);
@@ -687,34 +727,81 @@ async function handleUpdate(update, env, ctx) {
 // ==========================================
 // ۲. منوها و رابط کاربری (چینش دو تایی دکمه‌ها در هر سطر)
 // ==========================================
-async function sendMainMenu(botToken, chatId, userId, adminId) {
+const UI = {
+  fa: {
+    welcome: "🚀 سلام دوست خوبم، به ربات هوش مصنوعی خودت خوش آمدی! از منوی زیر گزینه موردنظرت را انتخاب کن 🫡",
+    chat: "💬 گفتگو و کدنویسی", image: "🎨 تصویرسازی", model: "🤖 انتخاب مدل", history: "📜 تاریخچه گفتگوها",
+    agent: "🖥 حالت ایجنت (ترمینال)", newChat: "➕ گفتگوی جدید", settings: "⚙️ تنظیمات", admin: "🛠 پنل مدیریت",
+    settingsTitle: "⚙️ تنظیمات", lang: "🌐 زبان: فارسی", agentOn: "🖥 ایجنت: روشن ✅", agentOff: "🖥 ایجنت: خاموش ❌",
+    imgMenu: "🎨 مدل و ابعاد تصویر", memory: "🧠 حافظه بلندمدت", resetWs: "🗑 پاک کردن ورک‌اسپیس", help: "❓ راهنما",
+    back: "🏠 منوی اصلی", langTitle: "🌐 زبان ربات را انتخاب کنید:\n(روی منوها و زبان پاسخ هوش مصنوعی اثر دارد)",
+    langSet: "✅ زبان روی فارسی تنظیم شد.", adminOnly: "⛔ پنل مدیریت فقط برای ادمین ربات است.", wsCleared: "🗑 ورک‌اسپیس پاک شد.",
+    noMem: "🧠 هنوز چیزی در حافظه ذخیره نشده.", memTitle: "🧠 حافظه بلندمدت:"
+  },
+  en: {
+    welcome: "🚀 Welcome to your AI bot! Pick an option below 🫡",
+    chat: "💬 Chat & coding", image: "🎨 Image generation", model: "🤖 Choose model", history: "📜 Chat history",
+    agent: "🖥 Agent mode (terminal)", newChat: "➕ New chat", settings: "⚙️ Settings", admin: "🛠 Admin panel",
+    settingsTitle: "⚙️ Settings", lang: "🌐 Language: English", agentOn: "🖥 Agent: ON ✅", agentOff: "🖥 Agent: OFF ❌",
+    imgMenu: "🎨 Image model & size", memory: "🧠 Long-term memory", resetWs: "🗑 Clear workspace", help: "❓ Help",
+    back: "🏠 Main menu", langTitle: "🌐 Choose the bot language:\n(affects menus and the AI reply language)",
+    langSet: "✅ Language set to English.", adminOnly: "⛔ The admin panel is only for the bot admin.", wsCleared: "🗑 Workspace cleared.",
+    noMem: "🧠 Nothing saved in memory yet.", memTitle: "🧠 Long-term memory:"
+  }
+};
+
+export async function getLang(env, userId) {
+  return (await safeKvGet(env, `LANG_${userId}`)) === "en" ? "en" : "fa";
+}
+
+async function sendMainMenu(botToken, chatId, userId, adminId, env = null, messageId = null) {
+  const t = UI[env ? await getLang(env, userId) : "fa"];
+  const keyboard = [
+    [{ text: t.chat, callback_data: "mode_chat" }, { text: t.image, callback_data: "mode_image" }],
+    [{ text: t.model, callback_data: "select_model_menu" }, { text: t.history, callback_data: "history_menu" }],
+    [{ text: t.agent, callback_data: "toggle_agent" }, { text: t.newChat, callback_data: "new_chat" }],
+    [{ text: t.settings, callback_data: "settings_menu" }]
+  ];
+  if (userId === adminId) keyboard[keyboard.length - 1].push({ text: t.admin, callback_data: "admin_panel" });
+  await showMenu(botToken, chatId, messageId, t.welcome, keyboard);
+}
+
+async function showMenu(botToken, chatId, messageId, text, keyboard) {
+  const payload = { chat_id: chatId, text, reply_markup: { inline_keyboard: keyboard } };
+  if (messageId) {
+    const r = await tgRequest(botToken, "editMessageText", { ...payload, message_id: messageId });
+    if (r.ok || /not modified/i.test(r.description || "")) return;
+  }
+  await tgRequest(botToken, "sendMessage", payload);
+}
+
+async function sendSettingsMenu(botToken, env, chatId, userId, adminId, messageId = null) {
+  const lang = await getLang(env, userId);
+  const t = UI[lang];
+  const agentRaw = await safeKvGet(env, `AGENT_MODE_${userId}`);
+  const agentOn = agentRaw === null ? true : agentRaw === "on";
+  const keyboard = [
+    [{ text: t.lang, callback_data: "lang_menu" }],
+    [{ text: agentOn ? t.agentOn : t.agentOff, callback_data: "settings_toggle_agent" }],
+    [{ text: t.model, callback_data: "select_model_menu" }, { text: t.imgMenu, callback_data: "mode_image" }],
+    [{ text: t.memory, callback_data: "memory_view" }, { text: t.resetWs, callback_data: "settings_reset_ws" }],
+    [{ text: t.help, callback_data: "help_view" }, { text: t.newChat, callback_data: "new_chat" }]
+  ];
+  if (userId === adminId) keyboard.push([{ text: t.admin, callback_data: "admin_panel" }]);
+  keyboard.push([{ text: t.back, callback_data: "main_menu" }]);
+  await showMenu(botToken, chatId, messageId, t.settingsTitle, keyboard);
+}
+
+async function sendLangMenu(botToken, env, chatId, userId, messageId = null) {
+  const lang = await getLang(env, userId);
   const keyboard = [
     [
-      { text: "💬 گفتگو و کدنویسی", callback_data: "mode_chat" },
-      { text: "🎨 تصویرسازی هوش مصنوعی", callback_data: "mode_image" }
+      { text: `${lang === "fa" ? "✅ " : ""}🇮🇷 فارسی`, callback_data: "set_lang_fa" },
+      { text: `${lang === "en" ? "✅ " : ""}🇬🇧 English`, callback_data: "set_lang_en" }
     ],
-    [
-      { text: "🤖 انتخاب مدل هوش مصنوعی", callback_data: "select_model_menu" },
-      { text: "📜 تاریخچه گفتگوها", callback_data: "history_menu" }
-    ],
-    [
-      { text: "🖥 حالت ایجنت (ترمینال)", callback_data: "toggle_agent" }
-    ],
-    [
-      { text: "➕ شروع گفتگوی جدید", callback_data: "new_chat" }
-    ]
+    [{ text: UI[lang].settings, callback_data: "settings_menu" }]
   ];
-
-  if (userId === adminId) {
-    keyboard[keyboard.length - 1].push({ text: "⚙️ پنل مدیریت ادمین", callback_data: "admin_panel" });
-  }
-
-  await tgRequest(botToken, "sendMessage", {
-    chat_id: chatId,
-    text: "🚀سلام دوست خوبم به ربات هوش مصنوعی خودت خوش امدی از منو پایین گزینه مورد نظرت رو انتخاب کن 🫡!",
-    parse_mode: "Markdown",
-    reply_markup: { inline_keyboard: keyboard }
-  });
+  await showMenu(botToken, chatId, messageId, UI[lang].langTitle, keyboard);
 }
 
 async function sendHistoryMenu(botToken, env, chatId, userId) {
@@ -987,7 +1074,8 @@ async function processAIRequest(botToken, env, chatId, userId, msg, textPrompt, 
 
     const systemPrompt = {
       role: "system",
-      content: "تو یک مهندس ارشد نرم‌افزار و متخصص هوش مصنوعی هستی. پاسخ کاربر را کاملاً دقیق، تمیز، خلاصه و به همراه توضیحات لازم یا کد Markdown ارسال کن."
+      content: "تو یک مهندس ارشد نرم‌افزار و متخصص هوش مصنوعی هستی. پاسخ کاربر را کاملاً دقیق، تمیز، خلاصه و به همراه توضیحات لازم یا کد Markdown ارسال کن." +
+        ((await getLang(env, userId)) === "en" ? " Always answer in English." : "")
     };
 
     const payload = {

@@ -72,6 +72,7 @@ Current dir: ${vfs.cwd}
 Workspace files (${files.length}${files.length >= 40 ? "+" : ""}): ${files.length ? files.join(", ") : "(empty)"}
 Date: ${new Date().toISOString()}
 User: ${state.fromName || "unknown"}
+Preferred reply language: ${state.lang === "en" ? "English (always reply in English)" : "the user's language (default Persian)"}
 ${memories.length ? "## What you remember about this user\n" + memories.map(m => `- [${m.id}] ${m.text}`).join("\n") : "No saved memories yet."}`;
 }
 
@@ -123,7 +124,7 @@ export async function startAgent(env, p) {
 
   const state = {
     runId, chatId: p.chatId, userId: p.userId, targetKeyId: p.targetKeyId, isGroup: p.isGroup, replyTo: p.replyTo,
-    statusMsgId, sessionId, modelIdx, fromName: p.fromName, mention: p.mention,
+    statusMsgId, sessionId, modelIdx, fromName: p.fromName, mention: p.mention, lang: p.lang || "fa",
     history, userText: userTextOnly, messages: [], step: 0, timeouts: 0, toolLog: [], started: Date.now()
   };
   state.messages = [...history.map(h => ({ role: h.role, content: h.content })), { role: "user", content: userContent }];
@@ -486,6 +487,7 @@ export const AGENT_HELP =
   "`/files` درخت فایل‌های ورک‌اسپیس\n" +
   "`/get <مسیر>` دریافت یک فایل\n" +
   "`/agent` روشن/خاموش کردن حالت ایجنت\n" +
+  "`/settings` تنظیمات — `/lang` تغییر زبان — `/admin` پنل مدیریت\n" +
   "`/memory` مشاهده حافظه بلندمدت — `/forget` پاک کردن آن\n" +
   "`/reset_ws` پاک کردن کامل ورک‌اسپیس\n\n" +
   "فایل (کد/متن) بفرستی در ورک‌اسپیس ذخیره می‌شود.";
