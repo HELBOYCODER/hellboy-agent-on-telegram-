@@ -198,8 +198,18 @@ export async function processImage(botToken, env, chatId, userId, msg, promptTex
     await tgRequest(botToken, "editMessageText", { chat_id: chatId, message_id: statusId, text: "✍️ توضیح تصویر را بنویس." });
     return;
   }
-  const out = await generateImage(sel.model, prompt, { size: sel.size, inputImage });
-  const ok = !out.error && await sendPhotoResult(botToken, chatId, out, `✨ ${sel.model.name} · ${sel.size}\n📝 ${prompt}`, replyTo);
+  let out = await generateImage(sel.model, prompt, { size: sel.size, inputImage });
+  let usedName = sel.model.name;
+  if (out.error && /429|quota|RESOURCE_EXHAUSTED/i.test(out.error) && !inputImage) {
+    // quota exhausted: fall back to another configured image model
+    const alt = sel.models.find((m, i) => i !== sel.idx && /pollinations/.test(m.baseUrl)) || sel.models.find((m, i) => i !== sel.idx);
+    if (alt) {
+      const o2 = await generateImage(alt, prompt, { size: sel.size });
+      if (!o2.error) { out = o2; usedName = `${alt.name} (جایگزین؛ سهمیه ${sel.model.name} تمام شده)`; }
+    }
+    if (out.error) out.error = `سهمیه‌ی ${sel.model.name} تمام شده است. در Google AI Studio پلن/Billing پروژه را فعال کنید یا مدل دیگری انتخاب کنید.`;
+  }
+  const ok = !out.error && await sendPhotoResult(botToken, chatId, out, `✨ ${usedName} · ${sel.size}\n📝 ${prompt}`, replyTo);
   if (ok) { if (statusId) await tgRequest(botToken, "deleteMessage", { chat_id: chatId, message_id: statusId }); }
   else await tgRequest(botToken, "editMessageText", { chat_id: chatId, message_id: statusId, text: `❌ ساخت تصویر ناموفق بود.\n${out.error || "ارسال تصویر به تلگرام شکست خورد."}` });
 }
