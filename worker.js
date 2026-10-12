@@ -7,6 +7,7 @@ import {
   startAgent, continueAgent, userShell, resetWorkspace, listMemories, clearMemories, saveUpload,
   setOrigin, agentSignature, AGENT_HELP
 } from "./agent.js";
+import { transcribe } from "./media.js";
 import {
   processImage, sendChatModelMenu, sendImageMenu, handleScanCallback, handleScanStep
 } from "./providers.js";
@@ -252,6 +253,26 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
 
+    // ---------- ویس → متن (Workers AI Whisper) ----------
+    const asAudio = (m) => m && (m.voice || m.audio || m.video_note || (m.document?.mime_type?.startsWith("audio/") ? m.document : null));
+    const isTranscribeCmd = /^\/transcribe(@\S+)?\b/i.test(text);
+    const voice = asAudio(msg) || (isTranscribeCmd ? asAudio(msg.reply_to_message) : null);
+    if (voice && (isTranscribeCmd || !text.startsWith("/"))) {
+      if (isGroup && !isTranscribeCmd && !msg.reply_to_message?.from?.is_bot) return;
+      const t = UI[await getLang(env, userId)];
+      const st = await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: t.voiceWorking, reply_to_message_id: msg.message_id, allow_sending_without_reply: true });
+      const tr = await transcribe(env, botToken, voice.file_id);
+      if (!tr.error && !/[\p{L}\p{N}]/u.test(tr.text || "")) tr.error = t.voiceEmpty;
+      if (tr.error || !tr.text) {
+        await tgRequest(botToken, "editMessageText", { chat_id: chatId, message_id: st.result?.message_id, text: `${t.voiceFail}${tr.error ? `\n${tr.error}` : ""}` });
+        return;
+      }
+      await sendSafeAIResponse(botToken, chatId, st.result?.message_id, `🎙 ${t.voiceText}\n\n${tr.text}`);
+      const voiceMode = (await safeKvGet(env, `VOICE_MODE_${userId}`)) || "answer";
+      if (isTranscribeCmd || voiceMode === "text") return;
+      text = `${text && !text.startsWith("/") ? text + "\n\n" : ""}🎙 (پیام صوتی کاربر، تبدیل‌شده به متن): ${tr.text}`;
+    }
+
     // ---------- دستورات ایجنت / ترمینال ----------
     const cmdName = text.startsWith("/") ? text.split(/[\s@]/)[0].toLowerCase() : "";
     const cmdArg = text.replace(/^\/\S+\s*/, "").trim();
@@ -275,6 +296,21 @@ async function handleUpdate(update, env, ctx) {
       if (isGroup && !(await isGroupAdmin(botToken, chatId, userId, adminId)) && !cmdArg) return;
       if (cmdArg || msg.photo) await processImage(botToken, env, chatId, userId, msg, cmdArg, tk, isGroup ? msg.message_id : undefined);
       else { await safeKvPut(env, `USER_MODE_${tk}`, "IMAGE_GEN"); await sendImageMenu(botToken, env, chatId, userId, tk, 0, null, isGroup); }
+      return;
+    }
+
+    if (cmdName === "/search") {
+      if (!cmdArg) {
+        await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: "استفاده: `/search قیمت دلار امروز`", parse_mode: "Markdown" });
+        return;
+      }
+      await startAgent(env, {
+        botToken, chatId, userId, msg: { ...msg, photo: undefined }, targetKeyId: isGroup ? `group_${chatId}` : userId, isGroup,
+        textPrompt: `در اینترنت جستجو کن (web_search و در صورت نیاز read_url) و با ذکر لینک منابع، جواب دقیق و خلاصه بده:\n${cmdArg}`,
+        replyTo: isGroup ? msg.message_id : undefined,
+        fromName: msg.from.first_name || msg.from.username || "", lang: await getLang(env, userId),
+        mention: msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name || "کاربر")
+      });
       return;
     }
 
@@ -579,6 +615,10 @@ async function handleUpdate(update, env, ctx) {
         const cur = await safeKvGet(env, `AGENT_MODE_${userId}`);
         await safeKvPut(env, `AGENT_MODE_${userId}`, (cur === null || cur === "on") ? "off" : "on");
         await sendSettingsMenu(botToken, env, chatId, userId, adminId, mid);
+      } else if (data === "settings_voice") {
+        const cur = (await safeKvGet(env, `VOICE_MODE_${userId}`)) || "answer";
+        await safeKvPut(env, `VOICE_MODE_${userId}`, cur === "text" ? "answer" : "text");
+        await sendSettingsMenu(botToken, env, chatId, userId, adminId, mid);
       } else if (data === "settings_reset_ws") {
         await resetWorkspace(env, userId);
         await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: UI[await getLang(env, userId)].wsCleared });
@@ -736,7 +776,9 @@ const UI = {
     imgMenu: "🎨 مدل و ابعاد تصویر", memory: "🧠 حافظه بلندمدت", resetWs: "🗑 پاک کردن ورک‌اسپیس", help: "❓ راهنما",
     back: "🏠 منوی اصلی", langTitle: "🌐 زبان ربات را انتخاب کنید:\n(روی منوها و زبان پاسخ هوش مصنوعی اثر دارد)",
     langSet: "✅ زبان روی فارسی تنظیم شد.", adminOnly: "⛔ پنل مدیریت فقط برای ادمین ربات است.", wsCleared: "🗑 ورک‌اسپیس پاک شد.",
-    noMem: "🧠 هنوز چیزی در حافظه ذخیره نشده.", memTitle: "🧠 حافظه بلندمدت:"
+    noMem: "🧠 هنوز چیزی در حافظه ذخیره نشده.", memTitle: "🧠 حافظه بلندمدت:",
+    voiceAnswer: "🎙 ویس: تبدیل به متن + پاسخ", voiceOnly: "🎙 ویس: فقط تبدیل به متن",
+    voiceWorking: "🎙 در حال تبدیل ویس به متن...", voiceFail: "❌ تبدیل ویس به متن ناموفق بود.", voiceEmpty: "صدایی شبیه گفتار تشخیص داده نشد؛ واضح‌تر و نزدیک‌تر به میکروفون صحبت کن.", voiceText: "متن ویس:"
   },
   en: {
     welcome: "🚀 Welcome to your AI bot! Pick an option below 🫡",
@@ -746,7 +788,9 @@ const UI = {
     imgMenu: "🎨 Image model & size", memory: "🧠 Long-term memory", resetWs: "🗑 Clear workspace", help: "❓ Help",
     back: "🏠 Main menu", langTitle: "🌐 Choose the bot language:\n(affects menus and the AI reply language)",
     langSet: "✅ Language set to English.", adminOnly: "⛔ The admin panel is only for the bot admin.", wsCleared: "🗑 Workspace cleared.",
-    noMem: "🧠 Nothing saved in memory yet.", memTitle: "🧠 Long-term memory:"
+    noMem: "🧠 Nothing saved in memory yet.", memTitle: "🧠 Long-term memory:",
+    voiceAnswer: "🎙 Voice: transcribe + answer", voiceOnly: "🎙 Voice: transcribe only",
+    voiceWorking: "🎙 Transcribing voice...", voiceFail: "❌ Voice transcription failed.", voiceEmpty: "No speech detected; please speak clearly, closer to the mic.", voiceText: "Transcript:"
   }
 };
 
@@ -780,9 +824,11 @@ async function sendSettingsMenu(botToken, env, chatId, userId, adminId, messageI
   const t = UI[lang];
   const agentRaw = await safeKvGet(env, `AGENT_MODE_${userId}`);
   const agentOn = agentRaw === null ? true : agentRaw === "on";
+  const voiceMode = (await safeKvGet(env, `VOICE_MODE_${userId}`)) || "answer";
   const keyboard = [
     [{ text: t.lang, callback_data: "lang_menu" }],
     [{ text: agentOn ? t.agentOn : t.agentOff, callback_data: "settings_toggle_agent" }],
+    [{ text: voiceMode === "text" ? t.voiceOnly : t.voiceAnswer, callback_data: "settings_voice" }],
     [{ text: t.model, callback_data: "select_model_menu" }, { text: t.imgMenu, callback_data: "mode_image" }],
     [{ text: t.memory, callback_data: "memory_view" }, { text: t.resetWs, callback_data: "settings_reset_ws" }],
     [{ text: t.help, callback_data: "help_view" }, { text: t.newChat, callback_data: "new_chat" }]

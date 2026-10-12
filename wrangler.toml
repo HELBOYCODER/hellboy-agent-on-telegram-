@@ -10,3 +10,7 @@ ADMIN_ID = "8874504954"
 [[services]]
 binding = "SELF"
 service = "neo-admin-bot"
+
+# Cloudflare Workers AI (free daily allowance): Whisper speech-to-text
+[ai]
+binding = "AI"

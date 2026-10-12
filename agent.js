@@ -10,6 +10,7 @@
 import { redisCmd, redisPipe, VFS, HOME } from "./store.js";
 import { Shell, clip, HELP } from "./shell.js";
 import { generateImage, sendPhotoResult, getImageSelection } from "./providers.js";
+import { webSearch, formatResults, readUrl } from "./media.js";
 import { tgRequest, sendSafeAIResponse, getTelegramFileBase64, getOrCreateActiveSession, updateSessionTitleIfNew } from "./worker.js";
 
 const STEPS_PER_SLICE = 6;
@@ -36,6 +37,10 @@ const TOOLS = [
     { path: { type: "string" }, old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, ["path", "old_string", "new_string"]),
   fn("send_file", "Send a workspace file to the user in Telegram as a document.",
     { path: { type: "string" }, caption: { type: "string" } }, ["path"]),
+  fn("web_search", "Search the internet (DuckDuckGo) for up-to-date information: news, prices, docs, facts. Returns titles, URLs and snippets. Then use read_url on the best results for details.",
+    { query: { type: "string", description: "search query, in the most useful language (Persian or English)" } }, ["query"]),
+  fn("read_url", "Open a web page and return its readable text (HTML stripped). Use after web_search or for any link the user sends.",
+    { url: { type: "string" } }, ["url"]),
   fn("http_request", "Make an HTTP request to a public URL and return status + body (use for docs, APIs, web pages).",
     { url: { type: "string" }, method: { type: "string" }, headers: { type: "object" }, body: { type: "string" } }, ["url"]),
   fn("generate_image", "Generate (or edit, if the user attached a photo to this message) an image with the user's selected image model and send it to the chat.",
@@ -58,6 +63,8 @@ function systemPrompt(state, vfs, memories) {
 - A persistent per-user workspace (home: ${HOME}) with a bash-like terminal: create/edit files, run code (python, node, bash, C/C++, Go, Rust, Ruby, PHP, Lua, Perl, TypeScript) on a remote sandbox, curl public URLs.
 - No package installs (pip/npm) and no git: use standard libraries. Network from the sandbox itself is not guaranteed; use http_request/curl to fetch data.
 - Deliver results by writing files and calling send_file (or \`send file\` in bash). Projects with several files can be sent one by one.
+- Internet access: web_search + read_url. For anything time-sensitive (news, prices, versions, events, "today", "latest") ALWAYS search first and cite the source links in your answer. Your training data is older than today's date.
+- Voice messages from the user are transcribed to text automatically before they reach you (marked with 🎙).
 - Long-term memory (memory tool) and recall of older chats (search_history).
 
 ## How to work
@@ -284,6 +291,8 @@ function describe(name, a) {
     case "read_file": return `📖 read ${a.path}`;
     case "edit_file": return `✏️ edit ${a.path}`;
     case "send_file": return `📤 send ${a.path}`;
+    case "web_search": return `🔎 search: ${clip(String(a.query ?? ""), 50)}`;
+    case "read_url": return `📄 read: ${clip(String(a.url ?? ""), 60)}`;
     case "http_request": return `🌐 ${a.method || "GET"} ${clip(String(a.url ?? ""), 60)}`;
     case "generate_image": return `🎨 image: ${clip(String(a.prompt ?? ""), 50)}`;
     case "memory": return `🧠 memory ${a.action}`;
@@ -338,6 +347,8 @@ async function runTool(ctx, name, a) {
       const r = await shell.sendFile(String(a.path ?? ""), String(a.caption ?? ""));
       return r.code ? r.err : r.out;
     }
+    case "web_search": return formatResults(await webSearch(String(a.query ?? "")));
+    case "read_url": return readUrl(String(a.url ?? ""));
     case "http_request": {
       const args = ["curl", "-X", String(a.method || "GET"), ...Object.entries(a.headers || {}).flatMap(([k, v]) => ["-H", `${k}: ${v}`]), ...(a.body ? ["-d", String(a.body)] : []), String(a.url)];
       const r = await shell.exec(args, "");
@@ -483,6 +494,8 @@ export async function saveUpload(env, userId, filename, content) {
 export const AGENT_HELP =
   "🖥 *حالت ایجنت (ترمینال + کدنویسی)*\n\n" +
   "بدون دستور خاص فقط حرفت را بزن؛ ایجنت خودش فایل می‌سازد، کد را اجرا و دیباگ می‌کند و فایل نهایی را می‌فرستد.\n\n" +
+  "`/search <عبارت>` جستجوی اینترنتی + جمع‌بندی\n" +
+  "🎙 ویس بفرست تا به متن تبدیل و جواب داده شود (`/settings` برای حالت «فقط متن»)\n" +
   "`/sh <دستور>` ترمینال مستقیم (مثلاً `/sh ls -la`)\n" +
   "`/files` درخت فایل‌های ورک‌اسپیس\n" +
   "`/get <مسیر>` دریافت یک فایل\n" +
