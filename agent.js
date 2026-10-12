@@ -9,6 +9,7 @@
  */
 import { redisCmd, redisPipe, VFS, HOME } from "./store.js";
 import { Shell, clip, HELP } from "./shell.js";
+import { generateImage, sendPhotoResult, getImageSelection } from "./providers.js";
 import { tgRequest, sendSafeAIResponse, getTelegramFileBase64, getOrCreateActiveSession, updateSessionTitleIfNew } from "./worker.js";
 
 const STEPS_PER_SLICE = 6;
@@ -37,6 +38,8 @@ const TOOLS = [
     { path: { type: "string" }, caption: { type: "string" } }, ["path"]),
   fn("http_request", "Make an HTTP request to a public URL and return status + body (use for docs, APIs, web pages).",
     { url: { type: "string" }, method: { type: "string" }, headers: { type: "object" }, body: { type: "string" } }, ["url"]),
+  fn("generate_image", "Generate (or edit, if the user attached a photo to this message) an image with the user's selected image model and send it to the chat.",
+    { prompt: { type: "string" }, aspect: { type: "string", enum: ["1:1", "16:9", "9:16"] } }, ["prompt"]),
   fn("memory", "Long-term memory about the user that survives across ALL chats. action=save stores a short fact/preference/project note; list shows all; delete removes by id; search finds by keyword.",
     { action: { type: "string", enum: ["save", "list", "delete", "search"] }, text: { type: "string", description: "note text (save) or keyword (search)" }, id: { type: "integer", description: "note id (delete)" } }, ["action"]),
   fn("search_history", "Search the user's PREVIOUS chat sessions for a keyword to recall what was discussed earlier.",
@@ -281,6 +284,7 @@ function describe(name, a) {
     case "edit_file": return `✏️ edit ${a.path}`;
     case "send_file": return `📤 send ${a.path}`;
     case "http_request": return `🌐 ${a.method || "GET"} ${clip(String(a.url ?? ""), 60)}`;
+    case "generate_image": return `🎨 image: ${clip(String(a.prompt ?? ""), 50)}`;
     case "memory": return `🧠 memory ${a.action}`;
     case "search_history": return `🔎 history: ${clip(String(a.query ?? ""), 40)}`;
     default: return name;
@@ -337,6 +341,14 @@ async function runTool(ctx, name, a) {
       const args = ["curl", "-X", String(a.method || "GET"), ...Object.entries(a.headers || {}).flatMap(([k, v]) => ["-H", `${k}: ${v}`]), ...(a.body ? ["-d", String(a.body)] : []), String(a.url)];
       const r = await shell.exec(args, "");
       return clip(r.out + r.err, 8000);
+    }
+    case "generate_image": {
+      const sel = await getImageSelection(env, state.userId, state.targetKeyId);
+      if (!sel.model) return "error: no image model configured";
+      const out = await generateImage(sel.model, String(a.prompt ?? ""), { size: a.aspect || sel.size });
+      if (out.error) return `error: ${out.error}`;
+      const sent = await sendPhotoResult(env.BOT_TOKEN, state.chatId, out, `✨ ${sel.model.name}\n${String(a.prompt).slice(0, 300)}`, state.replyTo);
+      return sent ? "image generated and sent to the user" : "error: failed to send image";
     }
     case "memory": return memoryTool(env, state.userId, ctx.memories, a);
     case "search_history": return searchHistory(env, state.userId, String(a.query ?? ""));

@@ -7,6 +7,9 @@ import {
   startAgent, continueAgent, userShell, resetWorkspace, listMemories, clearMemories, saveUpload,
   setOrigin, agentSignature, AGENT_HELP
 } from "./agent.js";
+import {
+  processImage, sendChatModelMenu, sendImageMenu, handleScanCallback, handleScanStep
+} from "./providers.js";
 
 const TEXT_EXT = /\.(js|mjs|ts|tsx|jsx|py|txt|md|json|html|css|cpp|cc|c|h|hpp|java|go|rs|sh|yaml|yml|toml|ini|csv|xml|sql|php|rb|lua|pl|log|env|cfg)$/i;
 
@@ -267,6 +270,14 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
 
+    if (cmdName === "/image" || cmdName === "/imagine") {
+      const tk = isGroup ? `group_${chatId}` : userId;
+      if (isGroup && !(await isGroupAdmin(botToken, chatId, userId, adminId)) && !cmdArg) return;
+      if (cmdArg || msg.photo) await processImage(botToken, env, chatId, userId, msg, cmdArg, tk, isGroup ? msg.message_id : undefined);
+      else { await safeKvPut(env, `USER_MODE_${tk}`, "IMAGE_GEN"); await sendImageMenu(botToken, env, chatId, userId, tk, 0, null, isGroup); }
+      return;
+    }
+
     if (!isGroup && ["/sh", "/files", "/get", "/reset_ws", "/memory", "/forget", "/help"].includes(cmdName)) {
       if (cmdName === "/help") {
         await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: AGENT_HELP, parse_mode: "Markdown" });
@@ -463,7 +474,7 @@ async function handleUpdate(update, env, ctx) {
     const agentOn = agentRaw === null ? !isGroup : agentRaw === "on";
 
     if (userMode === "IMAGE_GEN") {
-      await processImageRequest(botToken, env, chatId, userId, text, targetKeyId);
+      await processImage(botToken, env, chatId, userId, msg, text, targetKeyId, isGroup ? targetReplyMsgId : undefined);
     } else if (agentOn) {
       if (uploadedDoc) {
         const savedPath = await saveUpload(env, userId, uploadedDoc.name, uploadedDoc.content);
@@ -510,7 +521,7 @@ async function handleUpdate(update, env, ctx) {
 
     if (isGroupQuery) {
       const settingsButtons = ["mode_chat", "mode_image", "select_model_menu", "toggle_agent"];
-      const isSetModel = data.startsWith("set_model_") || data.startsWith("set_img_model_");
+      const isSetModel = data.startsWith("set_model_") || data.startsWith("set_img_model_") || data.startsWith("img_size_");
 
       if (settingsButtons.includes(data) || isSetModel) {
         const isAdmin = await isGroupAdmin(botToken, chatId, userId, adminId);
@@ -525,7 +536,7 @@ async function handleUpdate(update, env, ctx) {
       }
 
       const pvOnlyButtons = ["main_menu", "check_sponsor", "history_menu", "new_chat"];
-      const isPvOnlyPrefix = data.startsWith("switch_sess_") || data.startsWith("admin_");
+      const isPvOnlyPrefix = data.startsWith("switch_sess_") || data.startsWith("admin_") || data.startsWith("scan_");
 
       if (pvOnlyButtons.includes(data) || isPvOnlyPrefix) {
         await tgRequest(botToken, "answerCallbackQuery", {
@@ -538,6 +549,12 @@ async function handleUpdate(update, env, ctx) {
     }
 
     await tgRequest(botToken, "answerCallbackQuery", { callback_query_id: query.id });
+
+    if (data === "noop") return;
+    if (data === "admin_scan" || data.startsWith("scan_")) {
+      if (userId === adminId) await handleScanCallback(botToken, env, query, adminId);
+      return;
+    }
 
     if (data === "check_sponsor" || data === "main_menu" || data === "mode_chat" || data === "mode_image" || data === "select_model_menu" || data === "history_menu" || data === "new_chat") {
       await clearUserState(env, userId);
@@ -559,9 +576,16 @@ async function handleUpdate(update, env, ctx) {
       await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: "💬 حالت گفتگو متنی، تصویری، فایل و ساخت کد فعال شد." });
     } else if (data === "mode_image") {
       await safeKvPut(env, `USER_MODE_${targetKeyId}`, "IMAGE_GEN");
-      if (!isGroupQuery) await sendImageModelSelectionMenu(botToken, env, chatId, userId);
+      await sendImageMenu(botToken, env, chatId, userId, targetKeyId, 0, null, isGroupQuery);
     } else if (data === "select_model_menu") {
-      await sendModelSelectionMenu(botToken, env, chatId, targetKeyId);
+      await sendChatModelMenu(botToken, env, chatId, targetKeyId, 0);
+    } else if (data.startsWith("models_pg_")) {
+      await sendChatModelMenu(botToken, env, chatId, targetKeyId, parseInt(data.slice(10)) || 0, query.message.message_id);
+    } else if (data.startsWith("img_pg_")) {
+      await sendImageMenu(botToken, env, chatId, userId, targetKeyId, parseInt(data.slice(7)) || 0, query.message.message_id, isGroupQuery);
+    } else if (data.startsWith("img_size_")) {
+      await safeKvPut(env, `IMG_SIZE_${targetKeyId}`, data.slice(9));
+      await sendImageMenu(botToken, env, chatId, userId, targetKeyId, 0, query.message.message_id, isGroupQuery);
     } else if (data.startsWith("set_model_")) {
       const modelIndex = data.replace("set_model_", "");
       await safeKvPut(env, `USER_MODEL_${targetKeyId}`, modelIndex);
@@ -578,13 +602,13 @@ async function handleUpdate(update, env, ctx) {
 
       const models = JSON.parse((await safeKvGet(env, "AI_MODELS")) || "[]");
       const selectedModelName = models[modelIndex]?.name || "انتخاب شده";
-      await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: `✅ مدل فعال چت روی **${selectedModelName}** تنظیم شد.` });
+      await sendChatModelMenu(botToken, env, chatId, targetKeyId, Math.floor(parseInt(modelIndex) / 8), query.message.message_id);
     } else if (data.startsWith("set_img_model_")) {
       const imgIdx = data.replace("set_img_model_", "");
       await safeKvPut(env, `USER_IMG_MODEL_${targetKeyId}`, imgIdx);
       const imgModels = JSON.parse((await safeKvGet(env, "IMAGE_MODELS")) || "[]");
       const selectedImgName = imgModels[imgIdx]?.name || "انتخاب شده";
-      await tgRequest(botToken, "sendMessage", { chat_id: chatId, text: `🎨 مدل ساخت عکس روی **${selectedImgName}** تنظیم شد.` });
+      await sendImageMenu(botToken, env, chatId, userId, targetKeyId, Math.floor(parseInt(imgIdx) / 8), query.message.message_id, isGroupQuery);
     } else if (data === "history_menu" && !isGroupQuery) {
       await sendHistoryMenu(botToken, env, chatId, userId);
     } else if (data === "new_chat" && !isGroupQuery) {
@@ -1193,6 +1217,9 @@ async function sendAdminPanel(botToken, chatId) {
       { text: "📋 لیست مدل‌ها", callback_data: "admin_list_models" }
     ],
     [
+      { text: "🔍 اسکن پروایدر (افزودن گروهی مدل)", callback_data: "admin_scan" }
+    ],
+    [
       { text: "✏️ ویرایش مدل‌ها", callback_data: "admin_edit_models_menu" },
       { text: "📢 افزودن اسپانسر", callback_data: "admin_add_sponsor" }
     ],
@@ -1350,6 +1377,7 @@ async function sendAdminSponsorList(botToken, env, chatId, messageId = null) {
 }
 
 async function handleAdminSteps(botToken, env, chatId, userId, text, step) {
+  if (step.startsWith("SCAN_")) return handleScanStep(botToken, env, chatId, userId, text, step);
   if (step === "ADD_MODEL_NAME") {
     await safeKvPut(env, `TEMP_MODEL_${userId}`, JSON.stringify({ name: text }));
     await safeKvPut(env, `ADMIN_STEP_${userId}`, "ADD_MODEL_URL");
@@ -1486,7 +1514,8 @@ async function clearUserState(env, userId) {
     safeKvDelete(env, `TEMP_MODEL_${userId}`),
     safeKvDelete(env, `TEMP_IMG_${userId}`),
     safeKvDelete(env, `ADMIN_EDIT_IDX_${userId}`),
-    safeKvDelete(env, `ADMIN_EDIT_IMG_IDX_${userId}`)
+    safeKvDelete(env, `ADMIN_EDIT_IMG_IDX_${userId}`),
+    safeKvDelete(env, `TEMP_SCAN_${userId}`)
   ]);
 }
 
