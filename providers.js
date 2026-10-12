@@ -97,7 +97,7 @@ export async function generateImage(model, prompt, { size = "1:1", inputImage = 
     }
 
     if (isGemini(base)) {
-      const root = base.replace(/\/openai$/, "");
+      const root = base.replace(/\/openai$/, "").replace(/\/v1(beta)?$/, "") + (/\/v1/.test(base) ? "/" + (base.match(/\/(v1beta|v1)(\/|$)/)?.[1] || "v1beta") : "/v1beta");
       if (/imagen/i.test(name)) {
         if (inputImage) return { error: "Imagen ویرایش عکس ندارد؛ از مدل gemini-*-image استفاده کنید" };
         const res = await fetch(`${root}/models/${name}:predict`, {
